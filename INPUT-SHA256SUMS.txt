@@ -1,0 +1,3 @@
+2bfa8b2950b166ccdfa42a34e511898ecf080028b87591827ba74f30f2eec2ce  ANA-VAL-008-PRE-REGISTRATION.md
+05bb5b5304929b5be7265499461001a12bd3361bcfe427ad753d19a60350676b  scripts/ana_val_008_real.py
+6877e956ebfc391b8be78d6aaf581b95afb4eb764d3b0bd9c1d2e63c8095a87a  .github/workflows/ana-val-008-real.yml
