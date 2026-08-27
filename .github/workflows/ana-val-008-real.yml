@@ -74,8 +74,8 @@ jobs:
           from pathlib import Path
           p=Path("kind-config.yaml")
           s=p.read_text()
-          s=s.replace("extraMounts:\n                - hostPath: /tmp/ana-val-008-audit",
-                      "extraMounts:\n                - hostPath: /tmp/ana-val-008-policy\n                  containerPath: /etc/kubernetes/policies\n                - hostPath: /tmp/ana-val-008-audit")
+          s=s.replace("extraMounts:\n      - hostPath: /tmp/ana-val-008-audit",
+                      "extraMounts:\n      - hostPath: /tmp/ana-val-008-policy\n        containerPath: /etc/kubernetes/policies\n      - hostPath: /tmp/ana-val-008-audit")
           p.write_text(s)
           PY
           kind create cluster --name ana-val-008 --config kind-config.yaml --image kindest/node:v1.36.1 --wait 180s
@@ -109,6 +109,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ANA-VAL-008-RUN-002-EVIDENCE
+          name: ANA-VAL-008-RUN-003-EVIDENCE
           path: evidence/
           if-no-files-found: error
