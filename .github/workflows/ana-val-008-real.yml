@@ -20,12 +20,14 @@ jobs:
 
       - name: Install kind and kubectl
         run: |
-          curl -Lo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
-          chmod +x /usr/local/bin/kind
-          curl -Lo /usr/local/bin/kubectl https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl
-          chmod +x /usr/local/bin/kubectl
-          kind version | tee evidence/kind-version.txt
-          kubectl version --client -o yaml | tee evidence/kubectl-client-version.yaml
+          mkdir -p "$HOME/bin"
+          curl -Lo "$HOME/bin/kind" https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x "$HOME/bin/kind"
+          curl -Lo "$HOME/bin/kubectl" https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl
+          chmod +x "$HOME/bin/kubectl"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/kind" version | tee evidence/kind-version.txt
+          "$HOME/bin/kubectl" version --client -o yaml | tee evidence/kubectl-client-version.yaml
 
       - name: Configure audit-enabled cluster
         run: |
@@ -68,7 +70,6 @@ jobs:
 
       - name: Create real Kubernetes control plane
         run: |
-          # Inject policy mount into kind node via an additional mount.
           python3 - <<'PY'
           from pathlib import Path
           p=Path("kind-config.yaml")
@@ -108,6 +109,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ANA-VAL-008-RUN-001-EVIDENCE
+          name: ANA-VAL-008-RUN-002-EVIDENCE
           path: evidence/
           if-no-files-found: error
