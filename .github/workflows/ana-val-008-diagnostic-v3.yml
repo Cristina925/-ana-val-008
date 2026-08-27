@@ -1,0 +1,168 @@
+name: ANA-VAL-008 Instrument v3 Diagnostic Retention
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Capture environment
+        run: |
+          mkdir -p diagnostic
+          python3 --version | tee diagnostic/python-version.txt
+          docker --version | tee diagnostic/docker-version.txt
+
+      - name: Install frozen tool versions
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -Lo "$HOME/bin/kind" https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x "$HOME/bin/kind"
+          curl -Lo "$HOME/bin/kubectl" https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl
+          chmod +x "$HOME/bin/kubectl"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/kind" version | tee diagnostic/kind-version.txt
+          "$HOME/bin/kubectl" version --client -o yaml | tee diagnostic/kubectl-client-version.yaml
+
+      - name: Reconstruct identical audit-enabled kind configuration
+        run: |
+          cat > audit-policy.yaml <<'EOF'
+          apiVersion: audit.k8s.io/v1
+          kind: Policy
+          rules:
+            - level: RequestResponse
+              resources:
+                - group: ""
+                  resources: ["configmaps"]
+            - level: Metadata
+          EOF
+
+          cat > kind-config.yaml <<'EOF'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+              extraMounts:
+                - hostPath: /tmp/ana-val-008-audit
+                  containerPath: /var/log/kubernetes
+              kubeadmConfigPatches:
+                - |
+                  kind: ClusterConfiguration
+                  apiServer:
+                    extraArgs:
+                      audit-policy-file: /etc/kubernetes/policies/audit-policy.yaml
+                      audit-log-path: /var/log/kubernetes/audit.log
+                    extraVolumes:
+                      - name: audit-policy
+                        hostPath: /etc/kubernetes/policies
+                        mountPath: /etc/kubernetes/policies
+                        readOnly: true
+                        pathType: DirectoryOrCreate
+          EOF
+
+          mkdir -p /tmp/ana-val-008-audit
+          mkdir -p /tmp/ana-val-008-policy
+          cp audit-policy.yaml /tmp/ana-val-008-policy/audit-policy.yaml
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("kind-config.yaml")
+          s=p.read_text()
+          s=s.replace(
+              "extraMounts:\n      - hostPath: /tmp/ana-val-008-audit",
+              "extraMounts:\n      - hostPath: /tmp/ana-val-008-policy\n        containerPath: /etc/kubernetes/policies\n      - hostPath: /tmp/ana-val-008-audit"
+          )
+          p.write_text(s)
+          PY
+
+          cp audit-policy.yaml diagnostic/audit-policy.yaml
+          cp kind-config.yaml diagnostic/kind-config.yaml
+
+      - name: Create cluster with failure retention
+        id: create_cluster
+        shell: bash
+        run: |
+          set +e
+          kind create cluster \
+            --name ana-val-008-diag \
+            --config kind-config.yaml \
+            --image kindest/node:v1.36.1 \
+            --wait 180s \
+            --retain \
+            > diagnostic/kind-create.stdout.txt \
+            2> diagnostic/kind-create.stderr.txt
+          rc=$?
+          echo "$rc" > diagnostic/kind-create-exit-code.txt
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Capture retained control-plane diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          docker ps -a --no-trunc > diagnostic/docker-ps-a.txt 2>&1
+          docker inspect ana-val-008-diag-control-plane \
+            > diagnostic/control-plane-docker-inspect.json 2>&1
+          docker logs ana-val-008-diag-control-plane \
+            > diagnostic/control-plane-docker.log 2>&1
+
+          mkdir -p diagnostic/kind-export
+          kind export logs diagnostic/kind-export \
+            --name ana-val-008-diag \
+            > diagnostic/kind-export.stdout.txt \
+            2> diagnostic/kind-export.stderr.txt
+
+          docker exec ana-val-008-diag-control-plane \
+            sh -c 'cat /etc/kubernetes/manifests/kube-apiserver.yaml' \
+            > diagnostic/kube-apiserver-manifest.yaml 2>&1
+
+          docker exec ana-val-008-diag-control-plane \
+            sh -c 'crictl ps -a' \
+            > diagnostic/crictl-ps-a.txt 2>&1
+
+          docker exec ana-val-008-diag-control-plane \
+            sh -c 'journalctl -u kubelet --no-pager -n 2000' \
+            > diagnostic/kubelet-journal.txt 2>&1
+
+          docker exec ana-val-008-diag-control-plane \
+            sh -c 'ls -la /etc/kubernetes/policies && cat /etc/kubernetes/policies/audit-policy.yaml' \
+            > diagnostic/audit-policy-inside-node.txt 2>&1
+
+          docker exec ana-val-008-diag-control-plane \
+            sh -c 'ls -la /var/log/kubernetes && tail -n 500 /var/log/kubernetes/audit.log' \
+            > diagnostic/audit-log-tail.txt 2>&1
+
+          sha256sum \
+            ANA-VAL-008-PRE-REGISTRATION.md \
+            scripts/ana_val_008_real.py \
+            .github/workflows/ana-val-008-real.yml \
+            > diagnostic/FROZEN-SCIENTIFIC-INPUT-SHA256SUMS.txt
+
+          find diagnostic -type f -print0 | sort -z | xargs -0 sha256sum \
+            > diagnostic/SHA256SUMS.txt
+
+      - name: Diagnostic stop rule
+        shell: bash
+        run: |
+          echo "DIAGNOSTIC ONLY: V08-01..V08-06 MUST NOT EXECUTE." | tee diagnostic/STOP-RULE.txt
+          echo "Cluster creation exit code: ${{ steps.create_cluster.outputs.exit_code }}" | tee -a diagnostic/STOP-RULE.txt
+          if [ "${{ steps.create_cluster.outputs.exit_code }}" = "0" ]; then
+            echo "Cluster unexpectedly became healthy. Stop here; do not execute scientific oracle." | tee -a diagnostic/STOP-RULE.txt
+          else
+            echo "Cluster creation failed as expected for diagnostic capture. Stop here." | tee -a diagnostic/STOP-RULE.txt
+          fi
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ANA-VAL-008-INSTRUMENT-V3-DIAGNOSTIC
+          path: diagnostic/
+          if-no-files-found: error
