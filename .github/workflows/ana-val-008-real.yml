@@ -1,0 +1,113 @@
+name: ANA-VAL-008 Real Kubernetes ConfigMap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ana-val-008:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Capture environment
+        run: |
+          mkdir -p evidence
+          python3 --version | tee evidence/python-version.txt
+          docker --version | tee evidence/docker-version.txt
+
+      - name: Install kind and kubectl
+        run: |
+          curl -Lo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x /usr/local/bin/kind
+          curl -Lo /usr/local/bin/kubectl https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl
+          chmod +x /usr/local/bin/kubectl
+          kind version | tee evidence/kind-version.txt
+          kubectl version --client -o yaml | tee evidence/kubectl-client-version.yaml
+
+      - name: Configure audit-enabled cluster
+        run: |
+          cat > audit-policy.yaml <<'EOF'
+          apiVersion: audit.k8s.io/v1
+          kind: Policy
+          rules:
+            - level: RequestResponse
+              resources:
+                - group: ""
+                  resources: ["configmaps"]
+            - level: Metadata
+          EOF
+
+          cat > kind-config.yaml <<'EOF'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+              extraMounts:
+                - hostPath: /tmp/ana-val-008-audit
+                  containerPath: /var/log/kubernetes
+              kubeadmConfigPatches:
+                - |
+                  kind: ClusterConfiguration
+                  apiServer:
+                    extraArgs:
+                      audit-policy-file: /etc/kubernetes/policies/audit-policy.yaml
+                      audit-log-path: /var/log/kubernetes/audit.log
+                    extraVolumes:
+                      - name: audit-policy
+                        hostPath: /etc/kubernetes/policies
+                        mountPath: /etc/kubernetes/policies
+                        readOnly: true
+                        pathType: DirectoryOrCreate
+          EOF
+          mkdir -p /tmp/ana-val-008-audit
+          mkdir -p /tmp/ana-val-008-policy
+          cp audit-policy.yaml /tmp/ana-val-008-policy/audit-policy.yaml
+
+      - name: Create real Kubernetes control plane
+        run: |
+          # Inject policy mount into kind node via an additional mount.
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("kind-config.yaml")
+          s=p.read_text()
+          s=s.replace("extraMounts:\n                - hostPath: /tmp/ana-val-008-audit",
+                      "extraMounts:\n                - hostPath: /tmp/ana-val-008-policy\n                  containerPath: /etc/kubernetes/policies\n                - hostPath: /tmp/ana-val-008-audit")
+          p.write_text(s)
+          PY
+          kind create cluster --name ana-val-008 --config kind-config.yaml --image kindest/node:v1.36.1 --wait 180s
+          kubectl version -o yaml | tee evidence/kubernetes-version.yaml
+          kubectl cluster-info dump > evidence/cluster-info-dump.txt
+
+      - name: Start API proxy
+        run: |
+          nohup kubectl proxy --port=8001 --address=127.0.0.1 > evidence/kubectl-proxy.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8001/version > evidence/api-version.json; then break; fi
+            sleep 1
+          done
+          test -s evidence/api-version.json
+
+      - name: Execute frozen six-case oracle once
+        run: |
+          python3 scripts/ana_val_008_real.py --api http://127.0.0.1:8001 --evidence evidence
+
+      - name: Freeze final evidence
+        if: always()
+        run: |
+          set +e
+          kubectl get namespace ana-val-008 -o json > evidence/final-namespace.json
+          kubectl get configmaps -n ana-val-008 -o json > evidence/final-configmaps.json
+          docker cp ana-val-008-control-plane:/var/log/kubernetes/audit.log evidence/kube-apiserver-audit.log
+          sha256sum ANA-VAL-008-PRE-REGISTRATION.md scripts/ana_val_008_real.py .github/workflows/ana-val-008-real.yml > evidence/INPUT-SHA256SUMS.txt
+          find evidence -type f -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS.txt
+
+      - name: Upload immutable evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ANA-VAL-008-RUN-001-EVIDENCE
+          path: evidence/
+          if-no-files-found: error
